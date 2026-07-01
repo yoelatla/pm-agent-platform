@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PM Agent Platform</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, sans-serif; }
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .log-box { font-family: ui-monospace, monospace; font-size: 11px; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+const BASE = "http://localhost:5002";
+
+async function api(path, method = "GET", body = null) {
+  const opts = { method, headers: { "Content-Type": "application/json" } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(BASE + path, opts);
+  return res.json();
+}
+
+// ── Tiny components ───────────────────────────────────────────────────────────
+
+function Spinner({ size = 14 }) {
+  return (
+    <svg className="spin" width={size} height={size} fill="none" viewBox="0 0 24 24">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+    </svg>
+  );
+}
+
+function Badge({ text, color = "slate" }) {
+  const colors = {
+    blue:   "bg-blue-900 text-blue-300 border-blue-700",
+    green:  "bg-emerald-900 text-emerald-300 border-emerald-700",
+    yellow: "bg-yellow-900 text-yellow-300 border-yellow-700",
+    red:    "bg-red-900 text-red-300 border-red-700",
+    slate:  "bg-slate-800 text-slate-400 border-slate-600",
+    purple: "bg-purple-900 text-purple-300 border-purple-700",
+  };
+  return (
+    <span className={`text-xs px-2 py-0.5 rounded border font-medium ${colors[color] || colors.slate}`}>
+      {text}
+    </span>
+  );
+}
+
+function ScanButton({ label, running, onStart, onStop, color = "blue" }) {
+  const colors = {
+    blue:   "bg-blue-600 hover:bg-blue-500",
+    green:  "bg-emerald-600 hover:bg-emerald-500",
+    yellow: "bg-yellow-600 hover:bg-yellow-500",
+    purple: "bg-purple-600 hover:bg-purple-500",
+    red:    "bg-red-700 hover:bg-red-600",
+  };
+  return running ? (
+    <button onClick={onStop} className="flex items-center gap-2 bg-red-700 hover:bg-red-600 text-white text-sm px-4 py-2 rounded-lg transition">
+      <Spinner size={12}/> Stop
+    </button>
+  ) : (
+    <button onClick={onStart} className={`${colors[color] || colors.blue} text-white text-sm px-4 py-2 rounded-lg transition`}>
+      {label}
+    </button>
+  );
+}
+
+function LogBox({ logs }) {
+  const ref = useRef(null);
+  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [logs]);
+  if (!logs || !logs.length) return null;
+  return (
+    <div ref={ref} className="log-box bg-slate-900 border border-slate-700 rounded-lg p-3 h-40 overflow-y-auto mt-3">
+      {logs.map((l, i) => (
+        <div key={i} className={`leading-5 ${l.startsWith("✅") ? "text-emerald-400" : l.startsWith("❌") || l.startsWith("⚠") ? "text-yellow-400" : "text-slate-400"}`}>
+          {l}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Status bar ────────────────────────────────────────────────────────────────
+
+function StatusBar({ status }) {
+  if (!status) return null;
+  return (
+    <div className="flex items-center gap-4 text-xs text-slate-400 border-b border-slate-800 px-6 py-2 bg-slate-900">
+      <span className={`flex items-center gap-1 ${status.chrome_connected ? "text-emerald-400" : "text-red-400"}`}>
+        <span className={`w-2 h-2 rounded-full ${status.chrome_connected ? "bg-emerald-400" : "bg-red-400"}`}/>
+        Chrome {status.chrome_connected ? "connected" : "disconnected"}
+      </span>
+      <span className={`flex items-center gap-1 ${status.seen_jobs_exists ? "text-emerald-400" : "text-slate-500"}`}>
+        <span className={`w-2 h-2 rounded-full ${status.seen_jobs_exists ? "bg-emerald-400" : "bg-slate-600"}`}/>
+        Jobs DB
+      </span>
+      <span className={`flex items-center gap-1 ${status.data_file_exists ? "text-emerald-400" : "text-slate-500"}`}>
+        <span className={`w-2 h-2 rounded-full ${status.data_file_exists ? "bg-emerald-400" : "bg-slate-600"}`}/>
+        {status.companies_in_data} companies tracked
+      </span>
+    </div>
+  );
+}
+
+// ── Jobs tab ──────────────────────────────────────────────────────────────────
+
+function JobsTab() {
+  const [jobs, setJobs]       = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [hours, setHours]     = useState(48);
+  const [search, setSearch]   = useState("");
+  const [scanState, setScan]  = useState({ li: false, web: false });
+  const [liLogs, setLiLogs]   = useState([]);
+  const [webLogs, setWebLogs] = useState([]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await api(`/api/jobs?hours=${hours}`);
+      if (r.success) setJobs(r.jobs || []);
+    } finally { setLoading(false); }
+  }, [hours]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Poll scan status
+  useEffect(() => {
+    const t = setInterval(async () => {
+      const [li, web] = await Promise.all([
+        api("/api/linkedin-scan-status"),
+        api("/api/web-scan-status"),
+      ]);
+      setScan({ li: li.running, web: web.running });
+      setLiLogs(li.logs || []);
+      setWebLogs(web.logs || []);
+      if (!li.running && !web.running) load();
+    }, 3000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const filtered = jobs.filter(j =>
+    !search || j.title.toLowerCase().includes(search.toLowerCase()) ||
+    j.company.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const sourceColor = { linkedin: "blue", techmap: "purple", greenhouse: "green", comeet: "yellow", nortech: "slate", drushim: "red" };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3 flex-wrap">
+        <input
+          value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Search jobs…"
+          className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm flex-1 min-w-48 focus:outline-none focus:border-blue-500"
+        />
+        <select value={hours} onChange={e => setHours(+e.target.value)}
+          className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+          <option value={12}>Last 12h</option>
+          <option value={24}>Last 24h</option>
+          <option value={48}>Last 48h</option>
+          <option value={168}>Last week</option>
+          <option value={99999}>All time</option>
+        </select>
+        <ScanButton label="Scan LinkedIn" running={scanState.li}
+          onStart={() => api("/api/run-linkedin-scan","POST")}
+          onStop={() => api("/api/stop-linkedin-scan","POST")} color="blue"/>
+        <ScanButton label="Scan Web" running={scanState.web}
+          onStart={() => api("/api/run-web-scan","POST")}
+          onStop={() => api("/api/stop-web-scan","POST")} color="purple"/>
+        <button onClick={load} className="text-slate-400 hover:text-white text-sm px-3 py-2 rounded-lg border border-slate-700 hover:border-slate-500 transition">
+          {loading ? <Spinner size={14}/> : "Refresh"}
+        </button>
+      </div>
+
+      <div className="text-xs text-slate-500">{filtered.length} PM / Senior PM roles {search && `matching "${search}"`}</div>
+
+      {(scanState.li || liLogs.length > 0) && <LogBox logs={liLogs}/>}
+      {(scanState.web || webLogs.length > 0) && <LogBox logs={webLogs}/>}
+
+      <div className="space-y-2">
+        {filtered.map(j => (
+          <div key={j.id} className="bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-xl p-4 flex items-start justify-between gap-4 transition">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap mb-1">
+                <a href={j.url} target="_blank" className="text-blue-400 hover:text-blue-300 font-medium text-sm truncate">
+                  {j.title}
+                </a>
+                <Badge text={j.source} color={sourceColor[j.source] || "slate"}/>
+              </div>
+              <div className="text-slate-300 text-sm">{j.company}</div>
+              <div className="text-slate-500 text-xs mt-1">{j.date}</div>
+            </div>
+          </div>
+        ))}
+        {!loading && filtered.length === 0 && (
+          <div className="text-center text-slate-500 py-16">
+            No PM jobs found. Run a scan to get started.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Contacts tab ──────────────────────────────────────────────────────────────
+
+function buildMsg(firstName, role, company, is1st) {
+  if (is1st) return `Hi ${firstName}, hope you're well! \n\nI'm interested in the ${role} role at ${company} and would love to share my resume with the hiring manager. \n\nWould you be open to it? \n\nThanks, Yoel`;
+  return `Hi ${firstName}, hope you're well! I'm interested in the ${role} role at ${company} and would love to share my resume with the hiring manager. Would you be open to it? Thanks, Yoel`.slice(0, 300);
+}
+
+function ContactCard({ contact, company, jobs }) {
+  const [degree, setDegree] = useState(contact.connection_degree || "2nd");
+  const [role, setRole]     = useState(jobs[0]?.role || jobs[0]?.title || "Product Manager");
+  const [open, setOpen]     = useState(false);
+  const [status, setStatus] = useState("idle");
+  const DEGREES = ["1st","2nd","3rd+","Unknown"];
+
+  const msg = buildMsg(contact.first_name, role, company, degree === "1st");
+  const charCount = msg.length;
+
+  async function send() {
+    setStatus("loading");
+    const r = await api("http://localhost:5001/api/open-outreach", "POST", {
+      profile_url: contact.profile_url,
+      message: buildMsg(contact.first_name, role, company, true),
+      connect_note: buildMsg(contact.first_name, role, company, false),
+      connection_degree: degree,
+    });
+    setStatus(r.success ? "sent" : "error");
+  }
+
+  const degBg = { "1st": "bg-emerald-800 text-emerald-200", "2nd": "bg-blue-800 text-blue-200" };
+
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+      <div className="flex items-center gap-3 p-4 cursor-pointer hover:bg-slate-800 transition" onClick={() => setOpen(!open)}>
+        <div className="w-9 h-9 rounded-full bg-slate-700 flex items-center justify-center text-sm font-bold text-slate-300">
+          {contact.first_name?.[0] || "?"}
+        </div>
+        <div className="flex-1 min-w-0">
+          <a href={contact.profile_url} target="_blank" className="text-blue-400 hover:text-blue-300 text-sm font-medium" onClick={e => e.stopPropagation()}>
+            {contact.name}
+          </a>
+          <div className="text-slate-400 text-xs truncate">{contact.title}</div>
+        </div>
+        <button onClick={e => { e.stopPropagation(); const i = DEGREES.indexOf(degree); setDegree(DEGREES[(i+1)%DEGREES.length]); }}
+          className={`text-xs px-2 py-0.5 rounded font-medium ${degBg[degree] || "bg-slate-700 text-slate-300"}`}>
+          {degree}
+        </button>
+        <span className="text-slate-600 text-sm">{open ? "▲" : "▼"}</span>
+      </div>
+
+      {open && (
+        <div className="border-t border-slate-800 p-4 space-y-3">
+          {jobs.length > 1 && (
+            <select value={role} onChange={e => setRole(e.target.value)}
+              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+              {jobs.map(j => <option key={j.url || j.role} value={j.role || j.title}>{j.role || j.title}</option>)}
+            </select>
+          )}
+          <textarea
+            value={msg} readOnly rows={degree === "1st" ? 6 : 3}
+            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-300 resize-none"/>
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-500">{charCount} chars {degree !== "1st" && `(${300-charCount} left)`}</span>
+            <button onClick={send} disabled={status === "loading"}
+              className={`text-sm px-4 py-2 rounded-lg transition font-medium ${
+                status === "sent" ? "bg-emerald-700 text-white" :
+                status === "error" ? "bg-red-700 text-white" :
+                "bg-blue-600 hover:bg-blue-500 text-white"
+              }`}>
+              {status === "loading" ? <Spinner size={14}/> : status === "sent" ? "✅ Opened" : status === "error" ? "❌ Failed" : degree === "1st" ? "Open Message" : "Open Connect"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContactsTab() {
+  const [data, setData]         = useState(null);
+  const [scoutState, setScout]  = useState(false);
+  const [scoutLogs, setScoutLogs] = useState([]);
+  const [search, setSearch]     = useState("");
+
+  const load = useCallback(async () => {
+    const r = await api("/api/contacts");
+    if (r.success) setData(r.data);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const t = setInterval(async () => {
+      const s = await api("/api/scout-status");
+      setScout(s.running);
+      setScoutLogs(s.logs || []);
+      if (!s.running) load();
+    }, 3000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const companies = Object.entries(data?.companies || {})
+    .filter(([name]) => !search || name.toLowerCase().includes(search.toLowerCase()))
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3 flex-wrap">
+        <input value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Filter companies…"
+          className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm flex-1 min-w-48 focus:outline-none focus:border-blue-500"/>
+        <ScanButton label="Find Contacts" running={scoutState}
+          onStart={() => api("/api/run-scout","POST")}
+          onStop={() => api("/api/stop-scout","POST")} color="green"/>
+        <button onClick={load} className="text-slate-400 hover:text-white text-sm px-3 py-2 rounded-lg border border-slate-700 hover:border-slate-500 transition">
+          Refresh
+        </button>
+      </div>
+
+      {(scoutState || scoutLogs.length > 0) && <LogBox logs={scoutLogs}/>}
+
+      <div className="text-xs text-slate-500">{companies.length} companies with contacts</div>
+
+      <div className="space-y-6">
+        {companies.map(([name, co]) => (
+          <div key={name}>
+            <div className="flex items-center gap-2 mb-2">
+              <h3 className="text-slate-200 font-semibold text-sm">{name}</h3>
+              <Badge text={`${(co.contacts||[]).length} contacts`} color="slate"/>
+              {co.jobs?.[0]?.role && <Badge text={(co.jobs||[]).map(j=>j.role||j.title).join(" · ")} color="blue"/>}
+            </div>
+            <div className="space-y-2 pl-2">
+              {(co.contacts || []).map(c => (
+                <ContactCard key={c.profile_url} contact={c} company={name} jobs={co.jobs || []}/>
+              ))}
+            </div>
+          </div>
+        ))}
+        {companies.length === 0 && (
+          <div className="text-center text-slate-500 py-16">
+            No contacts yet. Click "Find Contacts" to scan LinkedIn.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Agents tab ────────────────────────────────────────────────────────────────
+
+const AGENTS = [
+  { id: "job-scanner",        label: "Job Scanner",        color: "blue",   desc: "Scans LinkedIn + 8 job boards for PM roles",    start: "/api/run-linkedin-scan", stop: "/api/stop-linkedin-scan", status: "/api/linkedin-scan-status" },
+  { id: "web-scanner",        label: "Web Scanner",        color: "purple", desc: "Scrapes Techmap, Greenhouse, Comeet, Nortech…",  start: "/api/run-web-scan",       stop: "/api/stop-web-scan",       status: "/api/web-scan-status" },
+  { id: "contact-finder",     label: "Contact Finder",     color: "green",  desc: "Finds PM contacts on LinkedIn per company",     start: "/api/run-scout",          stop: "/api/stop-scout",          status: "/api/scout-status" },
+  { id: "company-discovery",  label: "Company Discovery",  color: "yellow", desc: "Discovers new Israeli tech companies to scan",  start: "/api/run-discovery",      stop: "/api/stop-discovery",      status: "/api/discovery-status" },
+  { id: "deep-scan",          label: "Deep Scan",          color: "slate",  desc: "Visits company career pages directly",          start: "/api/run-deep-scan",      stop: "/api/stop-deep-scan",      status: "/api/deep-scan-status" },
+];
+
+function AgentCard({ agent, state, onStart, onStop }) {
+  const [open, setOpen] = useState(false);
+  const colorMap = { blue:"border-blue-800", purple:"border-purple-800", green:"border-emerald-800", yellow:"border-yellow-800", slate:"border-slate-700" };
+
+  return (
+    <div className={`bg-slate-900 border ${colorMap[agent.color]||"border-slate-700"} rounded-xl overflow-hidden`}>
+      <div className="flex items-center gap-4 p-4">
+        <div className={`w-2 h-8 rounded-full ${state.running ? "bg-emerald-400" : "bg-slate-700"}`}/>
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <span className="text-slate-100 font-medium text-sm">{agent.label}</span>
+            {state.running && <Badge text="running" color="green"/>}
+          </div>
+          <p className="text-slate-500 text-xs mt-0.5">{agent.desc}</p>
+        </div>
+        <ScanButton label="Run" running={state.running} onStart={onStart} onStop={onStop} color={agent.color}/>
+        <button onClick={() => setOpen(!open)} className="text-slate-600 hover:text-slate-400 text-sm px-2">
+          {open ? "▲" : "▼"}
+        </button>
+      </div>
+      {open && state.logs && state.logs.length > 0 && (
+        <div className="border-t border-slate-800 px-4 pb-4">
+          <LogBox logs={state.logs}/>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentsTab() {
+  const [states, setStates] = useState({});
+
+  useEffect(() => {
+    const poll = async () => {
+      const results = await Promise.all(AGENTS.map(a => api(a.status)));
+      const next = {};
+      AGENTS.forEach((a, i) => { next[a.id] = results[i]; });
+      setStates(next);
+    };
+    poll();
+    const t = setInterval(poll, 3000);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <div className="space-y-3">
+      <p className="text-slate-500 text-xs">Agents run as background subprocesses. Each uses the appropriate scraper from the <code className="text-slate-400">linkedin_scan</code> library with PM-only title filtering.</p>
+      {AGENTS.map(a => (
+        <AgentCard key={a.id} agent={a} state={states[a.id] || {}}
+          onStart={() => api(a.start,"POST")}
+          onStop={() => api(a.stop,"POST")}/>
+      ))}
+    </div>
+  );
+}
+
+// ── Health tab ────────────────────────────────────────────────────────────────
+
+function HealthTab() {
+  const [report, setReport]   = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function run() {
+    setLoading(true);
+    try {
+      const r = await api("/api/health");
+      setReport(r);
+    } finally { setLoading(false); }
+  }
+
+  useEffect(() => { run(); }, []);
+
+  const icon = { "OK": "✅", "WARN": "⚠️", "FAIL": "❌" };
+  const textColor = { "OK": "text-emerald-400", "WARN": "text-yellow-400", "FAIL": "text-red-400" };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <h2 className="text-slate-200 font-semibold">Platform Health Check</h2>
+        <button onClick={run} disabled={loading}
+          className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-sm px-4 py-2 rounded-lg transition">
+          {loading ? <><Spinner size={12}/> Running…</> : "Run Check"}
+        </button>
+      </div>
+
+      {report && (
+        <>
+          <div className="flex items-center gap-4 text-sm">
+            <span className="text-emerald-400">✅ {report.passed} passed</span>
+            <span className="text-yellow-400">⚠️ {report.warned} warnings</span>
+            <span className="text-red-400">❌ {report.failed} failed</span>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 text-slate-500 text-xs">
+                  <th className="text-left px-4 py-2 font-medium">Check</th>
+                  <th className="text-left px-4 py-2 font-medium w-20">Status</th>
+                  <th className="text-left px-4 py-2 font-medium">Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.results.map((r, i) => (
+                  <tr key={i} className="border-b border-slate-800 last:border-0 hover:bg-slate-800 transition">
+                    <td className="px-4 py-3 text-slate-300 font-mono text-xs">{r.name}</td>
+                    <td className={`px-4 py-3 font-medium text-xs ${textColor[r.status]}`}>{icon[r.status]} {r.status}</td>
+                    <td className="px-4 py-3 text-slate-400 text-xs">{r.detail}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Blocklist tab ─────────────────────────────────────────────────────────────
+
+function BlocklistTab() {
+  const [patterns, setPatterns] = useState([]);
+  const [input, setInput]       = useState("");
+
+  const load = async () => { const r = await api("/api/blocklist"); setPatterns(r.patterns || []); };
+  useEffect(() => { load(); }, []);
+
+  async function add() {
+    if (!input.trim()) return;
+    await api("/api/blocklist","POST",{pattern:input.trim()});
+    setInput("");
+    load();
+  }
+
+  async function remove(p) {
+    await api("/api/blocklist","DELETE",{pattern:p});
+    load();
+  }
+
+  return (
+    <div className="space-y-4">
+      <p className="text-slate-500 text-xs">Companies matching any pattern are hidden from the jobs list. Case-insensitive substring match.</p>
+      <div className="flex gap-2">
+        <input value={input} onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && add()}
+          placeholder="e.g. staffing, outsource…"
+          className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm flex-1 focus:outline-none focus:border-blue-500"/>
+        <button onClick={add} className="bg-blue-600 hover:bg-blue-500 text-white text-sm px-4 py-2 rounded-lg transition">
+          Add
+        </button>
+      </div>
+      <div className="space-y-2">
+        {patterns.map(p => (
+          <div key={p} className="flex items-center justify-between bg-slate-900 border border-slate-800 rounded-lg px-4 py-2">
+            <code className="text-slate-300 text-sm">{p}</code>
+            <button onClick={() => remove(p)} className="text-red-400 hover:text-red-300 text-xs">Remove</button>
+          </div>
+        ))}
+        {patterns.length === 0 && <p className="text-slate-600 text-sm">No patterns yet.</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── App root ──────────────────────────────────────────────────────────────────
+
+const TABS = [
+  { id: "jobs",      label: "Jobs" },
+  { id: "contacts",  label: "Contacts" },
+  { id: "agents",    label: "Agents" },
+  { id: "health",    label: "Health" },
+  { id: "blocklist", label: "Blocklist" },
+];
+
+function App() {
+  const [tab, setTab]       = useState("jobs");
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    const poll = async () => { try { setStatus(await api("/api/status")); } catch {} };
+    poll();
+    const t = setInterval(poll, 10000);
+    return () => clearInterval(t);
+  }, []);
+
+  const panels = { jobs: <JobsTab/>, contacts: <ContactsTab/>, agents: <AgentsTab/>, health: <HealthTab/>, blocklist: <BlocklistTab/> };
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      {/* Header */}
+      <header className="bg-slate-900 border-b border-slate-800 px-6 py-3 flex items-center gap-4">
+        <div>
+          <h1 className="text-white font-bold text-lg leading-none">PM Agent Platform</h1>
+          <p className="text-slate-500 text-xs mt-0.5">Product Manager · Senior PM · Product Owner — Israel</p>
+        </div>
+      </header>
+
+      <StatusBar status={status}/>
+
+      {/* Tabs */}
+      <div className="bg-slate-900 border-b border-slate-800 px-6 flex gap-1">
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            className={`px-4 py-3 text-sm font-medium transition border-b-2 -mb-px ${
+              tab === t.id ? "border-blue-500 text-blue-400" : "border-transparent text-slate-500 hover:text-slate-300"
+            }`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <main className="flex-1 px-6 py-6 max-w-5xl mx-auto w-full">
+        {panels[tab]}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
