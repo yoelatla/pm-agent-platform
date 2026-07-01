@@ -19,18 +19,19 @@ jobs:
       with:
         node-version: '18'
 
-    - name: Install Axe DevTools CLI
-      run: npm install -g @axe-core/cli
-
-    - name: Run Axe accessibility scan on HTML files
+    - name: Install Axe test dependencies
       run: |
-        # Scan PLATFORM.html for accessibility issues
-        axe ./PLATFORM.html --tags wcag2aa --exit
+        npm install --save-dev @axe-core/cli axe-core playwright
+
+    - name: Start local HTTP server
+      run: |
+        npx http-server -p 8000 -o false &
+        sleep 2
       continue-on-error: true
 
-    - name: Install dependencies for testing
+    - name: Run Axe accessibility scan
       run: |
-        npm install --save-dev @testing-library/html axe-core
+        npx axe http://localhost:8000/PLATFORM.html --tags wcag2aa --exit
       continue-on-error: true
 
     - name: Report results
