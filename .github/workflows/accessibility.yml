@@ -14,24 +14,25 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Start local HTTP server
+      run: |
+        python -m http.server 8000 -d . &
+        sleep 2
+        echo "HTTP Server started on port 8000"
+
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '18'
 
-    - name: Install Axe test dependencies
-      run: |
-        npm install --save-dev @axe-core/cli axe-core playwright
-
-    - name: Start local HTTP server
-      run: |
-        npx http-server -p 8000 -o false &
-        sleep 2
-      continue-on-error: true
-
     - name: Run Axe accessibility scan
       run: |
-        npx axe http://localhost:8000/PLATFORM.html --tags wcag2aa --exit
+        npx @axe-core/cli http://localhost:8000/PLATFORM.html --tags wcag2aa
       continue-on-error: true
 
     - name: Report results
