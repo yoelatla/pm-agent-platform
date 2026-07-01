@@ -1,4 +1,4 @@
-name: Build & Deploy
+name: Build
 
 on:
   push:
@@ -96,22 +96,3 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
-  # Deploy (optional - configure based on your target)
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    name: Deploy
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Deploy to production
-      run: |
-        echo "🚀 Deploy step - Configure this based on your deployment target"
-        echo "   Options:"
-        echo "   - Heroku: Use heroku/deploy-github-app action"
-        echo "   - AWS: Use aws-actions/configure-aws-credentials"
-        echo "   - DigitalOcean: Use digitalocean/app_action"
-        echo "   - Custom: Add your deployment script here"
-      continue-on-error: true
