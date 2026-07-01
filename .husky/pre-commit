@@ -1,0 +1,22 @@
+#!/bin/sh
+. "$(dirname "$0")/_/husky.sh"
+
+# Run Axe accessibility linter on PLATFORM.html
+if git diff --cached --name-only | grep -q "PLATFORM.html"; then
+  echo "🔍 Running Axe accessibility check..."
+
+  # Start HTTP server
+  python -m http.server 8000 -d . > /dev/null 2>&1 &
+  SERVER_PID=$!
+  sleep 1
+
+  # Run Axe and fail if violations found
+  if ! npx @axe-core/cli http://localhost:8000/PLATFORM.html --tags wcag2aa; then
+    kill $SERVER_PID 2>/dev/null || true
+    echo "❌ Accessibility violations found! Fix them before committing."
+    exit 1
+  fi
+
+  kill $SERVER_PID 2>/dev/null || true
+  echo "✅ Accessibility check passed!"
+fi
