@@ -5,15 +5,31 @@
 if git diff --cached --name-only | grep -q "PLATFORM.html"; then
   echo "🔍 Running Axe accessibility check..."
 
-  # Start HTTP server
-  python -m http.server 8000 -d . > /dev/null 2>&1 &
-  SERVER_PID=$!
-  sleep 1
+  # Find available port
+  PORT=8001
+  while lsof -i :$PORT > /dev/null 2>&1; do
+    PORT=$((PORT + 1))
+  done
 
-  # Run Axe and fail if violations found
-  if ! npx @axe-core/cli http://localhost:8000/PLATFORM.html --tags wcag2aa; then
+  # Start HTTP server
+  python3 -m http.server $PORT -d "$(pwd)" > /tmp/http-server.log 2>&1 &
+  SERVER_PID=$!
+
+  # Wait for server to be ready
+  RETRIES=5
+  while [ $RETRIES -gt 0 ]; do
+    if curl -s http://localhost:$PORT/PLATFORM.html > /dev/null 2>&1; then
+      break
+    fi
+    RETRIES=$((RETRIES - 1))
+    sleep 0.5
+  done
+
+  # Run Axe
+  echo "Scanning with Axe (WCAG 2 AA)..."
+  if ! npx @axe-core/cli http://localhost:$PORT/PLATFORM.html --tags wcag2aa; then
     kill $SERVER_PID 2>/dev/null || true
-    echo "❌ Accessibility violations found! Fix them before committing."
+    echo "❌ Accessibility violations found! Fix before committing."
     exit 1
   fi
 
