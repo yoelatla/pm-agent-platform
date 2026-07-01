@@ -1,5 +1,9 @@
 #!/bin/sh
-. "$(dirname "$0")/_/husky.sh"
+
+# Husky hook initialization (optional - only if installed)
+if [ -f "$(dirname "$0")/_/husky.sh" ]; then
+  . "$(dirname "$0")/_/husky.sh"
+fi
 
 # Run Axe accessibility linter on PLATFORM.html
 if git diff --cached --name-only | grep -q "PLATFORM.html"; then
@@ -11,28 +15,29 @@ if git diff --cached --name-only | grep -q "PLATFORM.html"; then
     PORT=$((PORT + 1))
   done
 
-  # Start HTTP server
+  # Start HTTP server in background
   python3 -m http.server $PORT -d "$(pwd)" > /tmp/http-server.log 2>&1 &
   SERVER_PID=$!
+  trap "kill $SERVER_PID 2>/dev/null || true" EXIT
 
-  # Wait for server to be ready
-  RETRIES=5
+  # Wait for server to be ready (up to 5 seconds)
+  RETRIES=10
   while [ $RETRIES -gt 0 ]; do
     if curl -s http://localhost:$PORT/PLATFORM.html > /dev/null 2>&1; then
       break
     fi
     RETRIES=$((RETRIES - 1))
-    sleep 0.5
+    sleep 0.3
   done
 
-  # Run Axe
+  # Run Axe accessibility scan
   echo "Scanning with Axe (WCAG 2 AA)..."
-  if ! npx @axe-core/cli http://localhost:$PORT/PLATFORM.html --tags wcag2aa; then
-    kill $SERVER_PID 2>/dev/null || true
+  if ! npx @axe-core/cli http://localhost:$PORT/PLATFORM.html --tags wcag2aa 2>&1; then
     echo "❌ Accessibility violations found! Fix before committing."
     exit 1
   fi
 
-  kill $SERVER_PID 2>/dev/null || true
   echo "✅ Accessibility check passed!"
 fi
+
+exit 0
