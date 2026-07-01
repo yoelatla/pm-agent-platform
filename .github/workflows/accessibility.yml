@@ -30,12 +30,9 @@ jobs:
       with:
         node-version: '18'
 
-    - name: Install Axe CLI
-      run: npm install -g @axe-core/cli
-
     - name: Run Axe accessibility scan
       run: |
-        axe http://localhost:8000/PLATFORM.html --tags wcag2aa --exit
+        npx @axe-core/cli http://localhost:8000/PLATFORM.html --tags wcag2aa
       continue-on-error: true
 
     - name: Report results
